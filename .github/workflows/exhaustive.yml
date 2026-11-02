@@ -1,0 +1,104 @@
+name: exhaustive
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "calib = 40-case calibration sample; full = all shards"
+        type: choice
+        options: [calib, full]
+        default: calib
+      workers:
+        description: "parallel case workers per shard (4 vCPU runner => 4)"
+        default: "4"
+      verify_timeout:
+        description: "per-case initial/final complete-verification budget, seconds"
+        default: "240"
+      repair_timeout:
+        description: "per-case exhaustive search budget, seconds"
+        default: "900"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exhaustive-${{ github.ref }}-${{ inputs.mode }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        run: |
+          if [ "${{ inputs.mode }}" = "calib" ]; then
+            echo 'matrix=[0]' >> "$GITHUB_OUTPUT"
+          else
+            M=$(python3 -c 'import json;d=json.load(open("shards/index.json"));print(json.dumps([s["shard"] for s in d["shards"]]))')
+            echo "matrix=$M" >> "$GITHUB_OUTPUT"
+          fi
+          echo "matrix=$M"
+
+  run:
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 359
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned scientific stack
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "numpy==2.4.6" "scipy==1.16.2"
+
+      - name: Runner speed benchmark
+        run: python tools/gh_bench.py
+
+      - name: Run exhaustive shard
+        env:
+          TA_VERIFY_TIMEOUT: ${{ inputs.verify_timeout }}
+          TA_REPAIR_TIMEOUT: ${{ inputs.repair_timeout }}
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+          MKL_NUM_THREADS: "1"
+          VECLIB_MAXIMUM_THREADS: "1"
+          NUMEXPR_NUM_THREADS: "1"
+          PYTHONHASHSEED: "0"
+        run: |
+          set -euo pipefail
+          if [ "${{ inputs.mode }}" = "calib" ]; then
+            IDS="shards/calib.json"
+          else
+            IDS=$(printf "shards/shard_%03d.json" "${{ matrix.shard }}")
+          fi
+          echo "ids file: $IDS ($(python3 -c "import json;print(len(json.load(open('$IDS'))))") cases)"
+          python tools/run_full_adjustment.py \
+            --workers "${{ inputs.workers }}" \
+            --methods exhaustive \
+            --ids-file "$IDS" \
+            --verify-timeout "${{ inputs.verify_timeout }}" \
+            --repair-timeout "${{ inputs.repair_timeout }}" \
+            --tag "_gh_${{ matrix.shard }}"
+
+      - name: Upload shard records
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: exhaustive-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            checkpoints/exhaustive.jsonl
+            logs/
+          if-no-files-found: warn
+          retention-days: 14
