@@ -31,7 +31,8 @@ RESULTS = ROOT / "results"
 CKPT = ROOT / "checkpoints"
 LOGS = ROOT / "logs"
 RUN_CASE = ROOT / "tools/run_case.py"
-PY = ROOT / ".venv/bin/python"
+_venv_py = ROOT / ".venv/bin/python"
+PY = _venv_py if _venv_py.exists() else Path(sys.executable)
 
 METHODS = ["cpgld", "coquand", "exhaustive"]
 
